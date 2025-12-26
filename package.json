@@ -6,7 +6,10 @@
   "scripts": {
     "start": "wrangler dev",
     "build": "wrangler build",
-    "deploy": "wrangler publish"
+    "deploy": "wrangler publish",
+    "deploy:worker": "cd worker && npx wrangler deploy --env production",
+    "deploy:worker:dev": "cd worker && npx wrangler deploy --env development",
+    "deploy:worker:prod": "cd worker && npx wrangler deploy --env production"
   },
   "devDependencies": {
     "wrangler": "^4.56.0"
