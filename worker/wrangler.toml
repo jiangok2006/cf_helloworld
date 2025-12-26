@@ -1,0 +1,8 @@
+name = "hello-world-app"
+type = "javascript"
+
+# Specify the compatibility date for the Worker platform (required by Wrangler v4+)
+compatibility_date = "2025-12-26"
+
+[env.production]
+compatibility_date = "2023-10-01"

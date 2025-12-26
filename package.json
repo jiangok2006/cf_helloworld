@@ -1,0 +1,16 @@
+{
+  "name": "hello-world-app",
+  "version": "1.0.0",
+  "description": "A simple web application that displays 'Hello World' using Cloudflare Pages and a Cloudflare Worker.",
+  "main": "worker/index.js",
+  "scripts": {
+    "start": "wrangler dev",
+    "build": "wrangler build",
+    "deploy": "wrangler publish"
+  },
+  "devDependencies": {
+    "wrangler": "^4.56.0"
+  },
+  "author": "",
+  "license": "MIT"
+}
