@@ -51,6 +51,42 @@ hello-world-app
    ```bash
    npm run deploy:worker --prefix .
 
+4. **Database (D1) Migrations**
+
+This project uses Cloudflare D1 migrations (single source for dev and prod).
+
+- Configure the binding in `worker/wrangler.toml` (already set as `AUTH_DB`) and note `migrations_dir = "migrations"` under both environments.
+- Apply migrations locally (development):
+
+```bash
+cd worker
+npx wrangler d1 migrations apply AUTH_DB --env development --local
+```
+
+- Apply migrations to production:
+
+```bash
+cd worker
+npx wrangler d1 migrations apply AUTH_DB --env production
+```
+
+The old `dev/schema.sql` and `prod/schema.sql` files have been removed; use migrations exclusively.
+
+### Admin Bootstrap
+
+An admin user is bootstrapped via migration `001_bootstrap_admin.sql`:
+- Email: `jiangok2006@gmail.com`
+- Role: `ADMIN`
+- Active: `true`
+
+Apply after the initial schema migration:
+
+```bash
+cd worker
+npx wrangler d1 migrations apply AUTH_DB --env development --local   # development
+npx wrangler d1 migrations apply AUTH_DB --env production            # production
+```
+
 ## Passwordless (magic-link) authentication
 
 
@@ -62,15 +98,7 @@ Requirements:
 
 Setup steps:
 
-1. Create the D1 table for tokens (run in D1 SQL runner):
-
-```sql
-CREATE TABLE IF NOT EXISTS magic_tokens (
-   token TEXT PRIMARY KEY,
-   email TEXT NOT NULL,
-   expires_at INTEGER NOT NULL
-);
-```
+1. Initialize D1 schema via migrations (tables: tokens, sessions, roles, users). See `worker/migrations/000_init.sql` and run the migration commands above.
 
 2. Configure `worker/wrangler.toml` if needed: set `APP_URL` and `FROM_EMAIL` under `[vars]`.
 
@@ -91,7 +119,7 @@ POST /auth/request with JSON body `{ "email": "you@example.com" }` — the worke
 
 5. Verify the magic link:
 
-GET /auth/verify?token=...&email=... — the worker validates the token, removes it, and responds with success. (You should extend this to create a session cookie or issue a JWT for your application.)
+`GET /auth/verify?token=...&email=...` — the worker validates the token, removes it, and responds with success while setting an HttpOnly session cookie. Use `/auth/session` without query params; the worker reads the session from `Cookie` (or `Authorization: Bearer`).
 
 Security notes:
 - Tokens expire after 15 minutes. Adjust `index.js` as needed.
