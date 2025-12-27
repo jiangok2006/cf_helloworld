@@ -53,18 +53,26 @@
   <main class="page">
     <div class="card">
       <h1>Manage users</h1>
-      <p>This is a placeholder. Implement user listing and role management here.</p>
-      <table>
+      <form id="addUserForm" style="margin-bottom:12px; display:flex; gap:12px; align-items:center;">
+        <input type="email" id="newUserEmail" placeholder="user@example.com" required />
+        <select id="newUserRole">
+          <option value="USER">USER</option>
+          <option value="ADMIN">ADMIN</option>
+        </select>
+        <button type="submit">Add user</button>
+      </form>
+      <table id="usersTable">
         <thead>
-          <tr><th>Email</th><th>Role</th><th>Active</th><th>Created</th></tr>
+          <tr><th>Email</th><th>Role</th><th>Active</th><th>Created</th><th>Actions</th></tr>
         </thead>
-        <tbody>
-          <tr><td>example@domain.com</td><td>USER</td><td>true</td><td>—</td></tr>
-        </tbody>
+        <tbody></tbody>
       </table>
     </div>
   </main>
   <script>
+    let isAdmin = false;
+    let currentEmail = '';
+
     async function loadUser() {
       try {
         const res = await fetch('/auth/me');
@@ -72,9 +80,14 @@
         const userEl = document.getElementById('userEmail');
         if (json && json.ok) {
           userEl.textContent = json.email;
-          if (json.role !== 'ADMIN') {
+          currentEmail = json.email;
+          isAdmin = json.role === 'ADMIN';
+          if (!isAdmin) {
             const admin = document.getElementById('adminMenu');
             if (admin) admin.style.display = 'none';
+          }
+          if (isAdmin) {
+            await loadUsers();
           }
         } else {
           // Redirect unauthenticated users to the sign-in page
@@ -82,6 +95,99 @@
         }
       } catch {}
     }
+    async function loadUsers() {
+      const res = await fetch('/admin/users');
+      const j = await res.json();
+      const tbody = document.querySelector('#usersTable tbody');
+      tbody.innerHTML = '';
+      if (j && j.ok) {
+        (j.users || []).forEach(u => {
+          const tr = document.createElement('tr');
+          const createdStr = u.created_at ? new Date(u.created_at).toLocaleString() : '';
+          tr.innerHTML = `
+            <td>${u.email}</td>
+            <td>
+              <select class="roleSelect" data-email="${u.email}">
+                <option value="USER" ${u.role === 'USER' ? 'selected' : ''}>USER</option>
+                <option value="ADMIN" ${u.role === 'ADMIN' ? 'selected' : ''}>ADMIN</option>
+              </select>
+            </td>
+            <td>${u.is_active ? 'true' : 'false'}</td>
+            <td>${createdStr}</td>
+            <td>
+              <button class="toggleBtn" data-email="${u.email}" data-active="${u.is_active ? 1 : 0}">${u.is_active ? 'Deactivate' : 'Activate'}</button>
+              <button class="deleteBtn" data-email="${u.email}">Delete</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+        tbody.querySelectorAll('.roleSelect').forEach(sel => {
+          sel.addEventListener('change', async (e) => {
+            const email = e.target.getAttribute('data-email');
+            const newRole = e.target.value;
+            if (email === currentEmail && newRole !== 'ADMIN') {
+              alert('Cannot change your own role to USER.');
+              // revert selection back to ADMIN
+              e.target.value = 'ADMIN';
+              return;
+            }
+            const res = await fetch('/admin/users/role', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email, role: newRole })
+            });
+            const jr = await res.json().catch(() => ({}));
+            if (!(res.ok && jr && jr.ok)) {
+              alert((jr && jr.error) || 'Failed to update role');
+            } else {
+              await loadUsers();
+            }
+          });
+        });
+        tbody.querySelectorAll('.toggleBtn').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const email = e.target.getAttribute('data-email');
+            const curr = e.target.getAttribute('data-active') === '1';
+            const next = !curr;
+            await fetch('/admin/users/toggle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email, active: next })
+            });
+            await loadUsers();
+          });
+        });
+        tbody.querySelectorAll('.deleteBtn').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const email = e.target.getAttribute('data-email');
+            if (email === currentEmail) { alert('Cannot delete yourself.'); return; }
+            await fetch('/admin/users?email=' + encodeURIComponent(email), { method: 'DELETE' });
+            await loadUsers();
+          });
+        });
+      }
+    }
+
+    document.getElementById('addUserForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('newUserEmail').value.trim();
+      const role = document.getElementById('newUserRole').value;
+      if (!email) return;
+      const res = await fetch('/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, role })
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j && j.ok) {
+        document.getElementById('newUserEmail').value = '';
+        document.getElementById('newUserRole').value = 'USER';
+        await loadUsers();
+      } else {
+        alert((j && j.error) || 'Failed to add user');
+      }
+    });
+
     loadUser();
     document.getElementById('signoutLink').addEventListener('click', async (e) => {
       e.preventDefault();

@@ -24,6 +24,11 @@ database_name = "hello_auth_dev"
 database_id = "d49d9edb-5a4c-4103-85a4-892c9de6fa5f"
 migrations_dir = "migrations"
 
+[[env.development.r2_buckets]]
+binding = "FILES_BUCKET"
+bucket_name = "hello-files-dev"
+preview_bucket_name = "hello-files-dev-preview"
+
 [env.production]
 compatibility_date = "2023-10-01"
 
@@ -36,6 +41,10 @@ binding = "AUTH_DB"
 database_name = "hello_auth_prod"
 database_id = "caf8e655-8172-4448-98fa-b92045e037d8"
 migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "FILES_BUCKET"
+bucket_name = "hello-files-prod"
 
 [observability]
 [observability.logs]

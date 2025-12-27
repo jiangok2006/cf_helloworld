@@ -20,6 +20,9 @@
     .item:hover .submenu { display: block; }
     .page { max-width: 960px; margin: 24px auto; padding: 0 16px; }
     .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+    th { background: #f3f4f6; }
   </style>
 </head>
 <body>
@@ -50,33 +53,153 @@
   <main class="page">
     <div class="card">
       <h1>Manage files</h1>
-      <p>This is a placeholder. Implement file listing and actions here.</p>
+      <form id="uploadForm" enctype="multipart/form-data">
+        <div style="margin-bottom: 12px; display:flex; gap:12px; align-items:center;">
+          <input type="file" name="file" id="fileInput" required />
+          <button type="submit">Upload (your files)</button>
+        </div>
+      </form>
+      <div id="adminFilter" style="margin:8px 0; display:none;">
+        <label for="ownerSelect">Owner:</label>
+        <select id="ownerSelect"></select>
+      </div>
+      <table id="filesTable">
+        <thead>
+          <tr><th>Name</th><th>Size (bytes)</th><th>Uploaded</th><th>Actions</th><th>Link</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
   </main>
   <script>
-    async function loadUser() {
-      try {
-        const res = await fetch('/auth/me');
-        const json = await res.json();
-        const userEl = document.getElementById('userEmail');
-        if (json && json.ok) {
-          userEl.textContent = json.email;
-          if (json.role !== 'ADMIN') {
-            const admin = document.getElementById('adminMenu');
-            if (admin) admin.style.display = 'none';
+      let isAdmin = false;
+      let currentEmail = '';
+      let filterEmail = '';
+
+      async function loadUser() {
+        try {
+          const res = await fetch('/auth/me');
+          const json = await res.json();
+          const userEl = document.getElementById('userEmail');
+          if (json && json.ok) {
+            userEl.textContent = json.email;
+            currentEmail = json.email;
+            isAdmin = json.role === 'ADMIN';
+            document.getElementById('adminFilter').style.display = isAdmin ? 'block' : 'none';
+            if (isAdmin) {
+              await populateOwnerDropdown();
+            }
+          } else {
+            window.location.href = '/';
           }
-        } else {
-          // Redirect unauthenticated users to the sign-in page
-          window.location.href = '/';
+        } catch {}
+      }
+
+      async function populateOwnerDropdown() {
+        try {
+          const sel = document.getElementById('ownerSelect');
+          sel.innerHTML = '';
+          // Default option: current user's files
+          const optMe = document.createElement('option');
+          optMe.value = '';
+          optMe.textContent = 'My files (current)';
+          sel.appendChild(optMe);
+          const res = await fetch('/admin/users');
+          const j = await res.json();
+          if (j && j.ok && Array.isArray(j.users)) {
+            j.users
+              .filter(u => u && u.email && u.email !== currentEmail)
+              .forEach(u => {
+                const opt = document.createElement('option');
+                opt.value = u.email;
+                opt.textContent = `${u.email} (${u.role})`;
+                sel.appendChild(opt);
+              });
+          }
+          sel.addEventListener('change', async () => {
+            filterEmail = sel.value;
+            await loadFiles(filterEmail);
+          });
+        } catch {}
+      }
+
+      async function loadFiles(ownerEmail) {
+        const params = ownerEmail && isAdmin ? ('?email=' + encodeURIComponent(ownerEmail)) : '';
+        const res = await fetch('/files/list' + params);
+        const json = await res.json();
+        const tbody = document.querySelector('#filesTable tbody');
+        tbody.innerHTML = '';
+        if (json && json.ok) {
+          (json.files || []).forEach(f => {
+            const name = f.key.split('/').pop();
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${name}</td><td>${f.size}</td><td>${new Date(f.uploaded).toLocaleString()}</td>
+              <td><button data-name="${name}" class="linkBtn">Get link</button> <button data-name="${name}" class="delBtn">Delete</button></td>
+              <td class="linkCell"></td>`;
+            tbody.appendChild(tr);
+          });
+          tbody.querySelectorAll('.linkBtn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+              const name = e.target.getAttribute('data-name');
+              const body = { name };
+              if (isAdmin && filterEmail) body.email = filterEmail;
+              const res = await fetch('/files/presign', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+              });
+              const j = await res.json();
+              if (j && j.ok && j.url) {
+                const row = e.target.closest('tr');
+                const cell = row.querySelector('.linkCell');
+                const expiry = new Date(j.expiresAt).toLocaleString();
+                const linkHtml = `
+                  <a href="${j.url}" target="_blank">Download link</a>
+                  <button class="copyBtn" data-url="${j.url}">Copy</button>
+                  <span class="muted">(expires: ${expiry})</span>
+                `;
+                cell.innerHTML = linkHtml;
+                const copyBtn = cell.querySelector('.copyBtn');
+                copyBtn.addEventListener('click', async (ev) => {
+                  ev.preventDefault();
+                  const url = copyBtn.getAttribute('data-url');
+                  try {
+                    await navigator.clipboard.writeText(url);
+                    copyBtn.textContent = 'Copied!';
+                    setTimeout(() => (copyBtn.textContent = 'Copy'), 1500);
+                  } catch {}
+                });
+              }
+            });
+          });
+          tbody.querySelectorAll('.delBtn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+              const name = e.target.getAttribute('data-name');
+              const query = new URLSearchParams();
+              query.set('name', name);
+              if (isAdmin && filterEmail) query.set('email', filterEmail);
+              await fetch('/files/delete?' + query.toString(), { method: 'DELETE' });
+              await loadFiles(filterEmail);
+            });
+          });
         }
-      } catch {}
-    }
-    loadUser();
-    document.getElementById('signoutLink').addEventListener('click', async (e) => {
-      e.preventDefault();
-      try { await fetch('/auth/signout', { method: 'POST' }); } catch {}
-      window.location.href = '/';
-    });
+      }
+
+      document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        // Always upload to current user's folder
+        fd.delete('email');
+        await fetch('/files/upload', { method: 'POST', body: fd });
+        await loadFiles(filterEmail);
+      });
+
+      loadUser().then(() => loadFiles(''));
+      document.getElementById('signoutLink').addEventListener('click', async (e) => {
+        e.preventDefault();
+        try { await fetch('/auth/signout', { method: 'POST' }); } catch {}
+        window.location.href = '/';
+      });
   </script>
 </body>
 </html>
