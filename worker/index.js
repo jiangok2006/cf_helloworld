@@ -3,7 +3,9 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === '/auth/request' && request.method === 'POST') {
-        const { email } = await request.json();
+        const body = await request.json();
+        const email = body && body.email;
+        const remember = !!(body && body.remember);
         if (!email) return jsonResponse({ error: 'email required' }, 400);
         // Require that the user exists and is active before sending a magic link
         const ures = await env.AUTH_DB.prepare(
@@ -21,13 +23,14 @@ export default {
           .bind(token, email, expiresAt)
           .run();
 
-        await sendMagicLink(email, token, env);
+        await sendMagicLink(email, token, env, remember);
         return jsonResponse({ ok: true });
       }
 
       if (url.pathname === '/auth/verify' && request.method === 'GET') {
         const token = url.searchParams.get('token');
         const email = url.searchParams.get('email');
+        const remember = url.searchParams.get('remember') === '1';
         if (!token || !email) return jsonResponse({ error: 'missing params' }, 400);
         const res = await env.AUTH_DB.prepare(
           `SELECT token, email, expires_at FROM magic_tokens WHERE token = ? AND email = ?`
@@ -44,7 +47,7 @@ export default {
         // token valid — create session and remove token
         const sessionId = generateToken();
         const now = Date.now();
-        const sessionExpires = now + 7 * 24 * 60 * 60 * 1000; // 7 days
+        const sessionExpires = now + 1 * 24 * 60 * 60 * 1000; // 1 day
         
         await env.AUTH_DB.prepare(
           `INSERT INTO sessions (session_id, email, created_at, expires_at) VALUES (?, ?, ?, ?)`
@@ -58,17 +61,28 @@ export default {
         await env.AUTH_DB.prepare(`DELETE FROM magic_tokens WHERE token = ?`).bind(token).run();
 
         // Set session as HttpOnly cookie; do not expose in body
-        const cookie = `sessionId=${encodeURIComponent(sessionId)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`;
-        // Redirect to after-sign-in page while setting cookie
-        return new Response(null, {
-          status: 302,
-          headers: {
-            'Location': '/app.html',
-            'Set-Cookie': cookie,
-            'Referrer-Policy': 'no-referrer',
-            'Cache-Control': 'no-store',
-          },
+        const sessionCookie = `sessionId=${encodeURIComponent(sessionId)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${1 * 24 * 60 * 60}`;
+        const headers = new Headers({
+          'Location': '/app.html',
+          'Set-Cookie': sessionCookie,
+          'Referrer-Policy': 'no-referrer',
+          'Cache-Control': 'no-store',
         });
+        if (remember) {
+          const rememberToken = generateToken();
+          const tokenHash = await sha256Hex(rememberToken);
+          const rNow = Date.now();
+          const rExp = rNow + 90 * 24 * 60 * 60 * 1000; // 90 days
+          const ua = request.headers.get('User-Agent') || '';
+          const uaHash = await sha256Hex(ua);
+          await env.AUTH_DB.prepare(
+            `INSERT OR REPLACE INTO remember_tokens (token_hash, email, created_at, expires_at, ua_hash) VALUES (?, ?, ?, ?, ?)`
+          ).bind(tokenHash, email, rNow, rExp, uaHash).run();
+          const rememberCookie = `remember=${encodeURIComponent(rememberToken)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${90 * 24 * 60 * 60}`;
+          headers.append('Set-Cookie', rememberCookie);
+        }
+        // Redirect to after-sign-in page while setting cookies
+        return new Response(null, { status: 302, headers });
       }
 
       // Return current authenticated user (email + role)
@@ -177,6 +191,14 @@ export default {
         const targetEmail = url.searchParams.get('email');
         if (!targetEmail) return jsonResponse({ error: 'email required' }, 400);
         if (targetEmail.toLowerCase() === sess.email.toLowerCase()) return jsonResponse({ error: 'cannot delete self' }, 400);
+        // Prevent deleting the last active admin
+        const target = await env.AUTH_DB.prepare(`SELECT role, is_active FROM users WHERE email = ?`).bind(targetEmail).all();
+        const t = target.results && target.results[0];
+        if (t && t.role === 'ADMIN' && t.is_active) {
+          const cntRes = await env.AUTH_DB.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN' AND is_active = 1 AND email != ?`).bind(targetEmail).all();
+          const c = cntRes.results && cntRes.results[0] && cntRes.results[0].c;
+          if (!c) return jsonResponse({ error: 'cannot delete last active admin' }, 400);
+        }
         await env.AUTH_DB.prepare(`DELETE FROM users WHERE email = ?`).bind(targetEmail).run();
         return jsonResponse({ ok: true });
       }
@@ -203,6 +225,16 @@ export default {
         const email = body && String(body.email || '').trim().toLowerCase();
         const active = !!(body && body.active);
         if (!email) return jsonResponse({ error: 'email required' }, 400);
+        if (!active) {
+          // Prevent deactivating last active admin
+          const row = await env.AUTH_DB.prepare(`SELECT role, is_active FROM users WHERE email = ?`).bind(email).all();
+          const u = row.results && row.results[0];
+          if (u && u.role === 'ADMIN' && u.is_active) {
+            const cntRes = await env.AUTH_DB.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN' AND is_active = 1 AND email != ?`).bind(email).all();
+            const c = cntRes.results && cntRes.results[0] && cntRes.results[0].c;
+            if (!c) return jsonResponse({ error: 'cannot deactivate last active admin' }, 400);
+          }
+        }
         await env.AUTH_DB.prepare(`UPDATE users SET is_active = ? WHERE email = ?`).bind(active ? 1 : 0, email).run();
         return jsonResponse({ ok: true });
       }
@@ -235,6 +267,16 @@ export default {
         if (email === sess.email && role !== 'ADMIN') {
           return jsonResponse({ error: 'cannot change own role to USER' }, 400);
         }
+        // Prevent demoting last active admin
+        if (role === 'USER') {
+          const cur = await env.AUTH_DB.prepare(`SELECT role, is_active FROM users WHERE email = ?`).bind(email).all();
+          const u = cur.results && cur.results[0];
+          if (u && u.role === 'ADMIN' && u.is_active) {
+            const cntRes = await env.AUTH_DB.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN' AND is_active = 1 AND email != ?`).bind(email).all();
+            const c = cntRes.results && cntRes.results[0] && cntRes.results[0].c;
+            if (!c) return jsonResponse({ error: 'cannot demote last active admin' }, 400);
+          }
+        }
         await env.AUTH_DB.prepare(`UPDATE users SET role = ? WHERE email = ?`).bind(role, email).run();
         return jsonResponse({ ok: true });
       }
@@ -256,6 +298,47 @@ export default {
         }
         
         return jsonResponse({ ok: true, email: session.email });
+      }
+
+      // Attempt session refresh from remember cookie
+      if (url.pathname === '/auth/refresh' && request.method === 'POST') {
+        const rememberCookie = getCookie(request, 'remember');
+        if (!rememberCookie) return jsonResponse({ error: 'no remember token' }, 401);
+        const tokenHash = await sha256Hex(rememberCookie);
+        const rres = await env.AUTH_DB.prepare(
+          `SELECT email, expires_at, ua_hash FROM remember_tokens WHERE token_hash = ?`
+        ).bind(tokenHash).all();
+        const row = rres && rres.results && rres.results[0];
+        if (!row) return jsonResponse({ error: 'invalid remember token' }, 401);
+        if (Date.now() > row.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM remember_tokens WHERE token_hash = ?`).bind(tokenHash).run();
+          return jsonResponse({ error: 'remember expired' }, 401);
+        }
+        // Device binding: require same User-Agent
+        const ua = request.headers.get('User-Agent') || '';
+        const uaHash = await sha256Hex(ua);
+        if (row.ua_hash && row.ua_hash !== uaHash) {
+          return jsonResponse({ error: 'device mismatch' }, 401);
+        }
+        // rotate token
+        const newToken = generateToken();
+        const newHash = await sha256Hex(newToken);
+        const now = Date.now();
+        const exp = now + 90 * 24 * 60 * 60 * 1000;
+        await env.AUTH_DB.prepare(
+          `INSERT OR REPLACE INTO remember_tokens (token_hash, email, created_at, expires_at, ua_hash) VALUES (?, ?, ?, ?, ?)`
+        ).bind(newHash, row.email, now, exp, uaHash).run();
+        await env.AUTH_DB.prepare(`DELETE FROM remember_tokens WHERE token_hash = ?`).bind(tokenHash).run();
+        const sessionId = generateToken();
+        const sessionExpires = now + 1 * 24 * 60 * 60 * 1000;
+        await env.AUTH_DB.prepare(
+          `INSERT INTO sessions (session_id, email, created_at, expires_at) VALUES (?, ?, ?, ?)`
+        ).bind(sessionId, row.email, now, sessionExpires).run();
+        const set1 = `sessionId=${encodeURIComponent(sessionId)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${1 * 24 * 60 * 60}`;
+        const set2 = `remember=${encodeURIComponent(newToken)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${90 * 24 * 60 * 60}`;
+        return new Response(JSON.stringify({ ok: true, email: row.email }), {
+          headers: { 'Content-Type': 'application/json', 'Set-Cookie': set1 + '\n' + set2 },
+        });
       }
 
       // Admin-only APIs: any path under /admin/* requires ADMIN role
@@ -431,11 +514,20 @@ export default {
         if (sessionId) {
           await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
         }
+        // clear remember token if present
+        const rem = getCookie(request, 'remember');
+        if (rem) {
+          const h = await sha256Hex(rem).catch(() => null);
+          if (h) {
+            await env.AUTH_DB.prepare(`DELETE FROM remember_tokens WHERE token_hash = ?`).bind(h).run();
+          }
+        }
         const clearCookie = 'sessionId=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0';
+        const clearRemember = 'remember=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0';
         return new Response(JSON.stringify({ ok: true }), {
           headers: {
             'Content-Type': 'application/json',
-            'Set-Cookie': clearCookie,
+            'Set-Cookie': clearCookie + '\n' + clearRemember,
             'Cache-Control': 'no-store',
           },
         });
@@ -470,7 +562,15 @@ function getSessionIdFromRequest(request) {
   return null;
 }
 
-async function sendMagicLink(email, token, env) {
+function getCookie(request, name) {
+  const cookieHeader = request.headers.get('Cookie') || '';
+  const parts = cookieHeader.split(';').map(s => s.trim());
+  const found = parts.find(s => s.startsWith(name + '='));
+  if (found) return decodeURIComponent(found.split('=')[1]);
+  return null;
+}
+
+async function sendMagicLink(email, token, env, remember = false) {
   // Use SendPulse REST API (OAuth client credentials)
   const clientId = env.SENDPULSE_CLIENT_ID;
   const clientSecret = env.SENDPULSE_CLIENT_SECRET;
@@ -498,7 +598,7 @@ async function sendMagicLink(email, token, env) {
     throw err;
   }
 
-  const link = `${APP_URL.replace(/\/$/, '')}/auth/verify?token=${token}&email=${encodeURIComponent(email)}`;
+  const link = `${APP_URL.replace(/\/$/, '')}/auth/verify?token=${token}&email=${encodeURIComponent(email)}${remember ? '&remember=1' : ''}`;
 
   const payload = {
     email: {
@@ -523,6 +623,14 @@ async function sendMagicLink(email, token, env) {
   if (!sendRes.ok) {
     throw new Error('SendPulse send failed: ' + responseText);
   }
+}
+
+async function sha256Hex(input) {
+  const enc = new TextEncoder();
+  const data = enc.encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const bytes = new Uint8Array(digest);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function jsonResponse(obj, status = 200) {

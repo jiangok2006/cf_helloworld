@@ -9,26 +9,55 @@
         <h1>Hello World</h1>
 
         <section>
-            <h2>Sign in with Email</h2>
-            <form id="magic-form">
-                <input type="email" id="email" placeholder="you@example.com" required />
-                <button type="submit">Send Sign-in Link</button>
-            </form>
+                        <h2>Sign in with Email</h2>
+                        <form id="magic-form">
+                                <input type="email" id="email" placeholder="you@example.com" required />
+                                <label style="margin-left:8px;">
+                                    <input type="checkbox" id="remember" /> Remember me
+                                </label>
+                                <button type="submit">Send Sign-in Link</button>
+                        </form>
             <p id="msg"></p>
         </section>
 
         <script>
+                        // If already signed in, or have remember cookie, redirect automatically
+                        (async () => {
+                            try {
+                                const me = await fetch('/auth/me');
+                                if (me.ok) {
+                                    const j = await me.json();
+                                    if (j && j.ok) {
+                                        window.location.href = '/app.html';
+                                        return;
+                                    }
+                                }
+                            } catch {}
+                            // Try refresh via remember token
+                            try {
+                                const r = await fetch('/auth/refresh', { method: 'POST' });
+                                if (r.ok) {
+                                    const j = await r.json();
+                                    if (j && j.ok) {
+                                        window.location.href = '/app.html';
+                                        return;
+                                    }
+                                }
+                            } catch {}
+                        })();
+
             const form = document.getElementById('magic-form');
             const msg = document.getElementById('msg');
             form.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 msg.textContent = 'Sending...';
                 const email = document.getElementById('email').value;
+                                const remember = document.getElementById('remember').checked;
                 try {
                     const res = await fetch('/auth/request', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email }),
+                                                body: JSON.stringify({ email, remember }),
                     });
                     const j = await res.json();
                     if (res.ok) msg.textContent = 'Magic link sent — check your inbox.';
