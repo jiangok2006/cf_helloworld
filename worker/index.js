@@ -5,6 +5,13 @@ export default {
       if (url.pathname === '/auth/request' && request.method === 'POST') {
         const { email } = await request.json();
         if (!email) return jsonResponse({ error: 'email required' }, 400);
+        // Require that the user exists and is active before sending a magic link
+        const ures = await env.AUTH_DB.prepare(
+          `SELECT email, is_active FROM users WHERE email = ? LIMIT 1`
+        ).bind(email).all();
+        const row = ures && ures.results && ures.results[0];
+        if (!row) return jsonResponse({ error: 'user not found' }, 404);
+        if (!row.is_active) return jsonResponse({ error: 'user inactive' }, 403);
         const token = generateToken();
         const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
         // store token in D1
@@ -34,9 +41,116 @@ export default {
           await env.AUTH_DB.prepare(`DELETE FROM magic_tokens WHERE token = ?`).bind(token).run();
           return jsonResponse({ error: 'token expired' }, 400);
         }
-        // token valid — create session (omitted) and remove token
+        // token valid — create session and remove token
+        const sessionId = generateToken();
+        const now = Date.now();
+        const sessionExpires = now + 7 * 24 * 60 * 60 * 1000; // 7 days
+        
+        await env.AUTH_DB.prepare(
+          `INSERT INTO sessions (session_id, email, created_at, expires_at) VALUES (?, ?, ?, ?)`
+        ).bind(sessionId, email, now, sessionExpires).run();
+        
+        // Ensure user exists (default role USER); do not overwrite existing ADMIN
+        await env.AUTH_DB.prepare(
+          `INSERT OR IGNORE INTO users (email, role, is_active, created_at) VALUES (?, 'USER', 1, ?)`
+        ).bind(email, now).run();
+
         await env.AUTH_DB.prepare(`DELETE FROM magic_tokens WHERE token = ?`).bind(token).run();
-        return jsonResponse({ ok: true, email });
+
+        // Set session as HttpOnly cookie; do not expose in body
+        const cookie = `sessionId=${encodeURIComponent(sessionId)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`;
+        // Redirect to after-sign-in page while setting cookie
+        return new Response(null, {
+          status: 302,
+          headers: {
+            'Location': '/app.html',
+            'Set-Cookie': cookie,
+            'Referrer-Policy': 'no-referrer',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+
+      // Return current authenticated user (email + role)
+      if (url.pathname === '/auth/me' && request.method === 'GET') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'sessionId required' }, 400);
+
+        const res = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const session = res && res.results && res.results[0];
+        if (!session) return jsonResponse({ error: 'invalid session' }, 401);
+        if (Date.now() > session.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+
+        const ures = await env.AUTH_DB.prepare(
+          `SELECT email, role, is_active FROM users WHERE email = ?`
+        ).bind(session.email).all();
+        const user = ures && ures.results && ures.results[0];
+        if (!user) return jsonResponse({ ok: true, email: session.email, role: 'USER' });
+        return jsonResponse({ ok: true, email: user.email, role: user.role });
+      }
+
+      if (url.pathname === '/auth/session' && request.method === 'GET') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'sessionId required' }, 400);
+        
+        const res = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        
+        const session = res && res.results && res.results[0];
+        if (!session) return jsonResponse({ error: 'invalid session' }, 401);
+        
+        if (Date.now() > session.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        
+        return jsonResponse({ ok: true, email: session.email });
+      }
+
+      // Admin-only APIs: any path under /admin/* requires ADMIN role
+      if (url.pathname.startsWith('/admin/')) {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+
+        const ures = await env.AUTH_DB.prepare(
+          `SELECT role FROM users WHERE email = ?`
+        ).bind(sess.email).all();
+        const user = ures && ures.results && ures.results[0];
+        if (!user || user.role !== 'ADMIN') return jsonResponse({ error: 'forbidden' }, 403);
+
+        // Authorized admin: return a generic OK for now
+        return jsonResponse({ ok: true, path: url.pathname });
+      }
+
+      if (url.pathname === '/auth/signout' && request.method === 'POST') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (sessionId) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+        }
+        const clearCookie = 'sessionId=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0';
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Set-Cookie': clearCookie,
+            'Cache-Control': 'no-store',
+          },
+        });
       }
 
       return new Response('Hello World from worker', {
@@ -51,6 +165,21 @@ export default {
 function generateToken() {
   const arr = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getSessionIdFromRequest(request) {
+  const auth = request.headers.get('Authorization');
+  if (auth && auth.startsWith('Bearer ')) {
+    return auth.slice(7).trim();
+  }
+  const cookieHeader = request.headers.get('Cookie') || '';
+  const parts = cookieHeader.split(';').map(s => s.trim());
+  const found = parts.find(s => s.startsWith('sessionId='));
+  if (found) {
+    const value = found.split('=')[1];
+    return decodeURIComponent(value);
+  }
+  return null;
 }
 
 async function sendMagicLink(email, token, env) {

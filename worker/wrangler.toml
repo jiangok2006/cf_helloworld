@@ -22,18 +22,20 @@ FROM_EMAIL = "help@her72.online"
 binding = "AUTH_DB"
 database_name = "hello_auth_dev"
 database_id = "d49d9edb-5a4c-4103-85a4-892c9de6fa5f"
+migrations_dir = "migrations"
 
 [env.production]
 compatibility_date = "2023-10-01"
 
 [env.production.vars]
 APP_URL = "https://example.com"
-FROM_EMAIL = "no-reply@example.com"
+FROM_EMAIL = "help@her72.online"
 
 [[env.production.d1_databases]]
 binding = "AUTH_DB"
 database_name = "hello_auth_prod"
 database_id = "caf8e655-8172-4448-98fa-b92045e037d8"
+migrations_dir = "migrations"
 
 [observability]
 [observability.logs]
