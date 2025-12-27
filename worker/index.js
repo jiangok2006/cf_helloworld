@@ -86,7 +86,7 @@ async function sendMagicLink(email, token, env) {
   const payload = {
     email: {
       subject: 'Your sign-in link',
-      from: { email: FROM_EMAIL },
+      from: { name: 'Hello World App', email: FROM_EMAIL },
       to: [{ email }],
       html: `<p>Click to sign in: <a href="${link}">${link}</a></p>`,
       text: `Sign in: ${link}`,

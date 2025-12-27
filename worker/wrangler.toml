@@ -15,8 +15,8 @@ directory = "../public"
 compatibility_date = "2025-12-26"
 
 [env.development.vars]
-APP_URL = "https://example.com"
-FROM_EMAIL = "no-reply@example.com"
+APP_URL = "https://hello-world-app-development.jiangok2006.workers.dev"
+FROM_EMAIL = "help@her72.online"
 
 [[env.development.d1_databases]]
 binding = "AUTH_DB"
