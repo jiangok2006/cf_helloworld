@@ -1,0 +1,22 @@
+
+# create local D1 table, use --remote for creating remote table.
+npx wrangler d1 execute AUTH_DB --file=./dev/schema.sql --env=development
+
+# run sql, use --remote for running sql remotely.
+npx wrangler d1 execute AUTH_DB --command="SELECT * FROM magic_tokens" --env=development
+
+# local test UI with local worker. Note: local worker cannot have outbound fetch (e.g. calls SendPulse).
+npx wrangler dev --env=development
+
+# local test UI. The worker runs remotely but worker's log is in terminal. 
+# --remote does not work reliably for testing SendPulse. I have to use fully remote development.
+npx wrangler dev --env=development --remote
+
+
+curl -X POST https://api.sendpulse.com/oauth/access_token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "client_credentials",
+    "client_id": "YOUR_CLIENT_ID_HERE",
+    "client_secret": "YOUR_CLIENT_SECRET_HERE"
+  }'
