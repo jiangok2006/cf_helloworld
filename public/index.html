@@ -6,6 +6,37 @@
     <title>Hello World</title>
 </head>
 <body>
-    <h1>Hello World</h1>
+        <h1>Hello World</h1>
+
+        <section>
+            <h2>Sign in with Email</h2>
+            <form id="magic-form">
+                <input type="email" id="email" placeholder="you@example.com" required />
+                <button type="submit">Send Sign-in Link</button>
+            </form>
+            <p id="msg"></p>
+        </section>
+
+        <script>
+            const form = document.getElementById('magic-form');
+            const msg = document.getElementById('msg');
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                msg.textContent = 'Sending...';
+                const email = document.getElementById('email').value;
+                try {
+                    const res = await fetch('/auth/request', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email }),
+                    });
+                    const j = await res.json();
+                    if (res.ok) msg.textContent = 'Magic link sent — check your inbox.';
+                    else msg.textContent = j.error || 'Failed to send';
+                } catch (err) {
+                    msg.textContent = 'Error: ' + err.message;
+                }
+            });
+        </script>
 </body>
 </html>
