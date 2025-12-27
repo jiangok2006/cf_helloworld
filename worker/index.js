@@ -136,6 +136,47 @@ export default {
         return jsonResponse({ ok: true, users });
       }
 
+      // Admin: file count stats per active user
+      if (url.pathname === '/admin/files/stats' && request.method === 'GET') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        const ures = await env.AUTH_DB.prepare(
+          `SELECT role FROM users WHERE email = ?`
+        ).bind(sess.email).all();
+        const admin = ures && ures.results && ures.results[0];
+        if (!admin || admin.role !== 'ADMIN') return jsonResponse({ error: 'forbidden' }, 403);
+
+        const listUsers = await env.AUTH_DB.prepare(
+          `SELECT email FROM users WHERE is_active = 1 ORDER BY email`
+        ).all();
+        const users = listUsers.results || [];
+        const stats = [];
+        for (const u of users) {
+          const prefix = `${u.email}/`;
+          let cursor = undefined;
+          let count = 0;
+          let bytes = 0;
+          do {
+            const res = await env.FILES_BUCKET.list({ prefix, cursor });
+            const objs = res.objects || [];
+            count += objs.length;
+            for (const o of objs) bytes += (o.size || 0);
+            cursor = res.truncated ? res.cursor : undefined;
+          } while (cursor);
+          stats.push({ email: u.email, count, bytes });
+        }
+        return jsonResponse({ ok: true, stats });
+      }
+
       // Admin: add user
       if (url.pathname === '/admin/users' && request.method === 'POST') {
         const sessionId = getSessionIdFromRequest(request);

@@ -23,6 +23,12 @@
     table { border-collapse: collapse; width: 100%; }
     th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
     th { background: #f3f4f6; }
+    .chart { margin: 12px 0; }
+    .bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+    .bar-label { width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar-container { flex: 1; background: #f3f4f6; height: 16px; border-radius: 8px; overflow: hidden; border: 1px solid #e5e7eb; }
+    .bar { height: 100%; background: #3b82f6; }
+    .bar-count { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
@@ -62,6 +68,23 @@
       <div id="adminFilter" style="margin:8px 0; display:none;">
         <label for="ownerSelect">Owner:</label>
         <select id="ownerSelect"></select>
+      </div>
+      <div id="stats" class="chart" style="display:none;">
+        <h3 style="margin:8px 0;">User file counts</h3>
+        <div style="display:flex; align-items:center; gap:12px; margin:8px 0;">
+          <label for="metricSelect">Show:</label>
+          <select id="metricSelect">
+            <option value="count" selected>File count</option>
+            <option value="bytes">Bytes</option>
+          </select>
+          <label for="topSelect">Top</label>
+          <select id="topSelect">
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div id="chartBody"></div>
       </div>
       <table id="filesTable">
         <thead>
@@ -119,6 +142,7 @@
           sel.addEventListener('change', async () => {
             filterEmail = sel.value;
             await loadFiles(filterEmail);
+            await loadStats();
           });
         } catch {}
       }
@@ -180,9 +204,50 @@
               if (isAdmin && filterEmail) query.set('email', filterEmail);
               await fetch('/files/delete?' + query.toString(), { method: 'DELETE' });
               await loadFiles(filterEmail);
+              await loadStats();
             });
           });
         }
+      }
+
+      async function loadStats() {
+        if (!isAdmin) return;
+        const wrap = document.getElementById('stats');
+        const body = document.getElementById('chartBody');
+        const metricSel = document.getElementById('metricSelect');
+        const topSel = document.getElementById('topSelect');
+        wrap.style.display = 'block';
+        body.innerHTML = '';
+        try {
+          const res = await fetch('/admin/files/stats');
+          const j = await res.json();
+          if (!(j && j.ok)) return;
+          const stats = (j.stats || []).slice();
+          const metric = (metricSel && metricSel.value) || 'count';
+          const topN = parseInt((topSel && topSel.value) || '10', 10);
+          stats.sort((a, b) => {
+            const av = metric === 'bytes' ? (a.bytes || 0) : (a.count || 0);
+            const bv = metric === 'bytes' ? (b.bytes || 0) : (b.count || 0);
+            return bv - av;
+          });
+          const sliced = stats.slice(0, Math.max(1, topN));
+          const max = Math.max(1, ...sliced.map(s => metric === 'bytes' ? (s.bytes || 0) : (s.count || 0)));
+          sliced.forEach(s => {
+            const row = document.createElement('div');
+            row.className = 'bar-row';
+            const value = metric === 'bytes' ? (s.bytes || 0) : (s.count || 0);
+            const widthPct = ((100 * value) / max).toFixed(0);
+            const labelVal = Number(value).toLocaleString();
+            row.innerHTML = `
+              <div class="bar-label" title="${s.email}">${s.email}</div>
+              <div class="bar-container"><div class="bar" style="width:${widthPct}%"></div></div>
+              <div class="bar-count">${labelVal}</div>
+            `;
+            body.appendChild(row);
+          });
+          if (metricSel) metricSel.onchange = async () => { await loadStats(); };
+          if (topSel) topSel.onchange = async () => { await loadStats(); };
+        } catch {}
       }
 
       document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -192,9 +257,10 @@
         fd.delete('email');
         await fetch('/files/upload', { method: 'POST', body: fd });
         await loadFiles(filterEmail);
+        await loadStats();
       });
 
-      loadUser().then(() => loadFiles(''));
+      loadUser().then(async () => { await loadFiles(''); if (isAdmin) await loadStats(); });
       document.getElementById('signoutLink').addEventListener('click', async (e) => {
         e.preventDefault();
         try { await fetch('/auth/signout', { method: 'POST' }); } catch {}
