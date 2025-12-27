@@ -509,6 +509,149 @@ export default {
         });
       }
 
+      // Files API: list files for current user (or any user if admin)
+      if (url.pathname === '/files/list' && request.method === 'GET') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        const ures = await env.AUTH_DB.prepare(`SELECT role FROM users WHERE email = ?`).bind(sess.email).all();
+        const user = ures.results && ures.results[0];
+        const isAdmin = user && user.role === 'ADMIN';
+
+        const targetEmail = url.searchParams.get('email');
+        const owner = isAdmin && targetEmail ? targetEmail : sess.email;
+        const prefix = `${owner}/`;
+        const list = await env.FILES_BUCKET.list({ prefix });
+        const files = (list.objects || []).map(o => ({ key: o.key, size: o.size, uploaded: o.uploaded }));
+        return jsonResponse({ ok: true, files, owner });
+      }
+
+      // Files API: upload a file for current user only (admins cannot upload for others)
+      if (url.pathname === '/files/upload' && request.method === 'POST') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        const form = await request.formData();
+        const file = form.get('file');
+        if (!file || typeof file === 'string') return jsonResponse({ error: 'file required' }, 400);
+        const owner = sess.email;
+        const key = `${owner}/${file.name}`;
+        const maxBytes = 10 * 1024 * 1024; // 10MB
+        if (file.size > maxBytes) return jsonResponse({ error: 'file too large' }, 413);
+        await env.FILES_BUCKET.put(key, file.stream(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } });
+        return jsonResponse({ ok: true, key, owner });
+      }
+
+      // Files API: delete a file for current user (or any user if admin)
+      if (url.pathname === '/files/delete' && request.method === 'DELETE') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        const ures = await env.AUTH_DB.prepare(`SELECT role FROM users WHERE email = ?`).bind(sess.email).all();
+        const user = ures.results && ures.results[0];
+        const isAdmin = user && user.role === 'ADMIN';
+
+        const emailParam = url.searchParams.get('email');
+        const nameParam = url.searchParams.get('name');
+        if (!nameParam) return jsonResponse({ error: 'name required' }, 400);
+        const owner = isAdmin && emailParam ? emailParam : sess.email;
+        const key = `${owner}/${nameParam}`;
+        await env.FILES_BUCKET.delete(key);
+        return jsonResponse({ ok: true, key });
+      }
+
+      // Files API: create a presigned URL (tokenized via D1) for downloading a file
+      if (url.pathname === '/files/presign' && request.method === 'POST') {
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return jsonResponse({ error: 'unauthorized' }, 401);
+
+        const sres = await env.AUTH_DB.prepare(
+          `SELECT session_id, email, expires_at FROM sessions WHERE session_id = ?`
+        ).bind(sessionId).all();
+        const sess = sres && sres.results && sres.results[0];
+        if (!sess) return jsonResponse({ error: 'unauthorized' }, 401);
+        if (Date.now() > sess.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM sessions WHERE session_id = ?`).bind(sessionId).run();
+          return jsonResponse({ error: 'session expired' }, 401);
+        }
+        const ures = await env.AUTH_DB.prepare(`SELECT role FROM users WHERE email = ?`).bind(sess.email).all();
+        const user = ures.results && ures.results[0];
+        const isAdmin = user && user.role === 'ADMIN';
+
+        const params = await request.json().catch(() => ({}));
+        const name = params && params.name;
+        const targetEmail = params && params.email;
+        if (!name) return jsonResponse({ error: 'name required' }, 400);
+        const owner = isAdmin && targetEmail ? String(targetEmail) : sess.email;
+        const key = `${owner}/${name}`;
+
+        const head = await env.FILES_BUCKET.head(key);
+        if (!head) return jsonResponse({ error: 'not found' }, 404);
+
+        const token = generateToken();
+        const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+        await env.AUTH_DB.prepare(
+          `INSERT INTO file_links (token, owner, name, expires_at) VALUES (?, ?, ?, ?)`
+        ).bind(token, owner, name, expiresAt).run();
+
+        const origin = new URL(request.url).origin;
+        const urlStr = `${origin}/files/download?token=${token}`;
+        return jsonResponse({ ok: true, url: urlStr, expiresAt });
+      }
+
+      // Files API: download using a presigned token
+      if (url.pathname === '/files/download' && request.method === 'GET') {
+        const token = url.searchParams.get('token');
+        if (!token) return jsonResponse({ error: 'token required' }, 400);
+        const fres = await env.AUTH_DB.prepare(
+          `SELECT token, owner, name, expires_at FROM file_links WHERE token = ?`
+        ).bind(token).all();
+        const link = fres && fres.results && fres.results[0];
+        if (!link) return jsonResponse({ error: 'invalid token' }, 404);
+        if (Date.now() > link.expires_at) {
+          await env.AUTH_DB.prepare(`DELETE FROM file_links WHERE token = ?`).bind(token).run();
+          return jsonResponse({ error: 'link expired' }, 410);
+        }
+        const key = `${link.owner}/${link.name}`;
+        const obj = await env.FILES_BUCKET.get(key);
+        if (!obj) return jsonResponse({ error: 'not found' }, 404);
+        const disposition = `attachment; filename="${link.name}"`;
+        return new Response(obj.body, {
+          headers: {
+            'Content-Type': obj.httpMetadata && obj.httpMetadata.contentType ? obj.httpMetadata.contentType : 'application/octet-stream',
+            'Content-Disposition': disposition,
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+
       if (url.pathname === '/auth/signout' && request.method === 'POST') {
         const sessionId = getSessionIdFromRequest(request);
         if (sessionId) {
